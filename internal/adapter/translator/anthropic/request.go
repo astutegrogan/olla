@@ -20,7 +20,6 @@ func (t *Translator) TransformRequest(ctx context.Context, r *http.Request) (*tr
 	// use decoder for memory efficiency and strict validation
 	var anthropicReq AnthropicRequest
 	decoder := json.NewDecoder(limitedBody)
-	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&anthropicReq); err != nil {
 		return nil, fmt.Errorf("failed to parse Anthropic request: %w", err)
@@ -68,6 +67,13 @@ func (t *Translator) TransformRequest(ctx context.Context, r *http.Request) (*tr
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert messages: %w", err)
 	}
+
+	// Qwen3 models generate a long <think> block before visible output; non-streaming
+	// requests time out waiting for it. /no_think suppresses the thinking block entirely.
+	if strings.Contains(strings.ToLower(anthropicReq.Model), "qwen3") {
+		openaiMessages = injectNoThink(openaiMessages)
+	}
+
 	openaiReq["messages"] = openaiMessages
 
 	// Convert tools if present
@@ -295,6 +301,20 @@ func (t *Translator) convertToolUse(block map[string]interface{}) map[string]int
 			"arguments": string(inputJSON),
 		},
 	}
+}
+
+// injectNoThink appends /no_think to the system message (or prepends one) so Qwen3
+// models skip the <think> block, which otherwise causes non-streaming requests to time out.
+func injectNoThink(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) > 0 {
+		if role, ok := messages[0]["role"].(string); ok && role == "system" {
+			if content, ok := messages[0]["content"].(string); ok {
+				messages[0]["content"] = content + "\n/no_think"
+			}
+			return messages
+		}
+	}
+	return append([]map[string]interface{}{{"role": "system", "content": "/no_think"}}, messages...)
 }
 
 // convert system prompt, handles string or content blocks
